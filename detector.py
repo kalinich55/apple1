@@ -10,7 +10,7 @@ class AppleDetector:
     Без tracking — только стабильная покадровая детекция.
     """
 
-    def __init__(self, model_path="yolov8n-seg.pt", camera_index=0):
+    def __init__(self, model_path="best.pt", camera_index=0):
         print("Загружаем модель YOLO...")
         self.model = YOLO(model_path)
         print("Модель загружена!")

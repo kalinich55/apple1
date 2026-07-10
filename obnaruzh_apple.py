@@ -3,6 +3,7 @@ import numpy as np
 from ultralytics import YOLO
 import os
 import sys
+import time
 
 # =========================
 # НАСТРОЙКИ
@@ -33,21 +34,51 @@ if TARGET_CLASS not in model.names.values():
     sys.exit()
 
 print("Открываем камеру...")
-cap = cv2.VideoCapture(0, cv2.CAP_DSHOW)
+cap = cv2.VideoCapture(0)
+
+# Просим 60 FPS
+cap.set(cv2.CAP_PROP_FPS, 60)
+
+# Необязательно, но можно попросить HD
+cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
+cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
 
 if not cap.isOpened():
     print("ОШИБКА: Камера не найдена!")
     sys.exit()
 
+camera_fps = cap.get(cv2.CAP_PROP_FPS)
+frame_width = cap.get(cv2.CAP_PROP_FRAME_WIDTH)
+frame_height = cap.get(cv2.CAP_PROP_FRAME_HEIGHT)
+
 print("Камера работает!")
+print(f"Заявленный FPS камеры: {camera_fps}")
+print(f"Разрешение: {int(frame_width)}x{int(frame_height)}")
 print("Нажмите 'q' для выхода")
 print("-" * 60)
+
+prev_time = time.time()
+fps_timer = time.time()
+frame_count = 0
+real_fps = 0.0
 
 while True:
     ret, frame = cap.read()
     if not ret:
         print("Ошибка чтения кадра")
         break
+
+    current_time = time.time()
+    dt = current_time - prev_time
+    prev_time = current_time
+
+    frame_count += 1
+    elapsed = current_time - fps_timer
+    if elapsed >= 1.0:
+        real_fps = frame_count / elapsed
+        frame_count = 0
+        fps_timer = current_time
+        print(f"Реальный FPS: {real_fps:.2f}, dt: {dt:.4f} сек")
 
     results = model(frame, verbose=False)
 
@@ -77,7 +108,6 @@ while True:
             h = y2 - y1
             ratio = w / h if h != 0 else 0
 
-            # Отсекаем слишком вытянутые объекты
             if ratio < 0.6 or ratio > 1.4:
                 continue
 
@@ -99,7 +129,6 @@ while True:
             area = cv2.contourArea(cnt)
             frame_area = frame.shape[0] * frame.shape[1]
 
-            # Отсекаем слишком маленькие и слишком большие объекты
             if area < 500:
                 continue
 
@@ -144,16 +173,56 @@ while True:
                 2
             )
 
+            cv2.putText(
+                frame,
+                f"FPS: {real_fps:.1f}",
+                (20, 40),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                1,
+                (0, 255, 0),
+                2
+            )
+
+            cv2.putText(
+                frame,
+                f"dt: {dt:.3f}s",
+                (20, 80),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.8,
+                (0, 255, 0),
+                2
+            )
+
             print(f"Яблоко найдено | Центр: ({cx}, {cy}) | Уверенность: {confidence:.2f}")
 
     if not apple_found:
         cv2.putText(
             frame,
             "Apple not found",
-            (20, 40),
+            (20, 130),
             cv2.FONT_HERSHEY_SIMPLEX,
             1,
             (0, 0, 255),
+            2
+        )
+
+        cv2.putText(
+            frame,
+            f"FPS: {real_fps:.1f}",
+            (20, 40),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            1,
+            (0, 255, 0),
+            2
+        )
+
+        cv2.putText(
+            frame,
+            f"dt: {dt:.3f}s",
+            (20, 80),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.8,
+            (0, 255, 0),
             2
         )
 
