@@ -24,8 +24,8 @@ class KalmanAccelPredictor:
         # Шум измерения:
         # считаем, что x и y измеряются с шумом
         self.R = np.array([
-            [9.0, 0.0],
-            [0.0, 9.0]
+            [25.0, 0.0],
+            [0.0, 25.0]
         ])
 
         # Матрица измерения:
@@ -112,7 +112,7 @@ class KalmanAccelPredictor:
 
         # ---------- Predict ----------
         F = self._build_F(dt)
-        Q = self._build_Q(dt, q=8.0)
+        Q = self._build_Q(dt, q=5.0)
 
         self.state = F @ self.state
         self.P = F @ self.P @ F.T + Q

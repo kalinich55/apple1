@@ -18,7 +18,7 @@ from predictors.factory import create_predictor
 
 SUCCESS_THRESHOLD = 20.0   # пикселей — порог "успешного" прогноза
 MIN_CHECKS_TO_SHOW = 5     # сколько проверок нужно накопить до вывода метрик
-PREDICTOR_NAME = "kalman"  # "linear", "poly2", "poly3", "kalman"
+PREDICTOR_NAME = "poly2"  # "linear", "poly2", "poly3", "kalman_ca" "kalman_cv"
 
 
 def run_realtime():
@@ -52,7 +52,7 @@ def run_realtime():
     print("Нажмите 'q' для выхода\n")
 
     while True:
-        frame, detection = detector.get_detection(conf_threshold=0.3)
+        frame, detection = detector.get_detection(conf_threshold=0.6)
         total_frames += 1
 
         if frame is None:

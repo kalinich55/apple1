@@ -2,6 +2,7 @@ from .linear_predictor import LinearPredictor
 from .poly2_predictor import Poly2Predictor
 from .poly3_predictor import Poly3Predictor
 from .kalman_accel_predictor import KalmanAccelPredictor
+from .kalman_cv_predictor import KalmanCVPredictor
 
 
 def create_predictor(name):
@@ -13,7 +14,9 @@ def create_predictor(name):
         return Poly2Predictor()
     elif name == "poly3":
         return Poly3Predictor()
-    elif name == "kalman":
+    elif name == "kalman_ca":
         return KalmanAccelPredictor()
+    elif name == "kalman_cv":
+        return KalmanCVPredictor()
     else:
         raise ValueError(f"Unknown predictor: {name}")

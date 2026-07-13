@@ -10,31 +10,40 @@ class AppleDetector:
     Без tracking — только стабильная покадровая детекция.
     """
 
-    def __init__(self, model_path="best.pt", camera_index=0):
+    def __init__(self, model_path="best.pt", camera_index=0, debug_timing=True):
         print("Загружаем модель YOLO...")
         self.model = YOLO(model_path)
         print("Модель загружена!")
 
         print("Открываем камеру...")
         self.cap = cv2.VideoCapture(camera_index)
+        
 
         if not self.cap.isOpened():
             raise RuntimeError("ОШИБКА: Камера не найдена!")
 
         print("Камера работает!")
 
-    def get_detection(self, conf_threshold=0.3):
+        self.debug_timing = debug_timing
+
+    def get_detection(self, conf_threshold=0.6):
         """
         Считывает кадр и пытается найти яблоко.
 
         conf_threshold: минимальный порог confidence.
-                        Снижен до 0.3 для лучшего обнаружения.
+        timestamp фиксируется в момент получения кадра,
+        а не после завершения inference.
         """
+        t_start = time.time()
+
         ret, frame = self.cap.read()
         if not ret:
             return None, None
 
-        # Обычная детекция без tracking
+        # Время получения кадра — используем его как timestamp измерения
+        t_frame = time.time()
+
+        # YOLO inference
         results = self.model(frame, verbose=False)
 
         best_detection = None
@@ -44,7 +53,7 @@ class AppleDetector:
                 continue
 
             for i, box in enumerate(r.boxes):
-                class_id   = int(box.cls[0])
+                class_id = int(box.cls[0])
                 confidence = float(box.conf[0])
 
                 if self.model.names[class_id] != "apple":
@@ -55,27 +64,34 @@ class AppleDetector:
 
                 x1, y1, x2, y2 = map(int, box.xyxy[0])
 
-                # Пробуем взять центр по маске
-                cx, cy, contour = self._get_mask_center(r, i, frame)
+                # Пытаемся взять центр по маске сегментации
+                cx, cy, contour = self._get_mask_center(r, i)
 
-                # Если маска не вышла — берем центр bbox
-                if cx is None:
+                # Если центр по маске не получился — fallback на bbox
+                if cx is None or cy is None:
                     cx = (x1 + x2) // 2
                     cy = (y1 + y2) // 2
 
                 if best_detection is None or confidence > best_detection["confidence"]:
                     best_detection = {
-                        "timestamp"  : time.time(),
-                        "x"          : cx,
-                        "y"          : cy,
-                        "confidence" : confidence,
-                        "bbox"       : (x1, y1, x2, y2),
-                        "contour"    : contour,
+                        "timestamp": t_frame,
+                        "x": cx,
+                        "y": cy,
+                        "confidence": confidence,
+                        "bbox": (x1, y1, x2, y2),
+                        "contour": contour,
                     }
+
+        t_end = time.time()
+
+        if self.debug_timing:
+            dt = t_end - t_start
+            fps = 1.0 / dt if dt > 1e-6 else 0.0
+            print(f"[Detector] frame_time={dt:.4f}s | fps={fps:.2f}")
 
         return frame, best_detection
 
-    def _get_mask_center(self, result, i, frame):
+    def _get_mask_center(self, result, i):
         """
         Получить центр объекта по маске сегментации.
         Возвращает (cx, cy, contour) или (None, None, None).
@@ -88,7 +104,7 @@ class AppleDetector:
                 return None, None, None
 
             polygon = result.masks.xy[i]
-            if len(polygon) < 3:
+            if polygon is None or len(polygon) < 3:
                 return None, None, None
 
             contour = polygon.astype(np.int32).reshape(-1, 1, 2)
@@ -112,8 +128,8 @@ class AppleDetector:
         if detection is None:
             return frame
 
-        x    = detection["x"]
-        y    = detection["y"]
+        x = detection["x"]
+        y = detection["y"]
         conf = detection["confidence"]
         x1, y1, x2, y2 = detection["bbox"]
         contour = detection.get("contour")

@@ -18,7 +18,7 @@ POLY2_HISTORY_SIZE = 6
 POLY3_HISTORY_SIZE = 8
 
 # Предсказание
-PREDICT_DELTA = 0.12
+PREDICT_DELTA = 0.08
 
 # Физическая модель
 GRAVITY_PX = 500.0
@@ -26,7 +26,7 @@ FIT_GRAVITY = False
 
 # Детекция
 MIN_CONFIDENCE = 0.6
-MAX_JUMP_PX = 200
+MAX_JUMP_PX = 350
 
 # Сглаживание координат
 SMOOTHING_WINDOW = 2
