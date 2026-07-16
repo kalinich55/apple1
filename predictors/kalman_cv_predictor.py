@@ -14,21 +14,22 @@ class KalmanCVPredictor:
         self.initialized = False
         self.measurement_count = 0
 
-        # Вектор состояния:
-        # x, y, vx, vy
+        # Для инициализации скорости по первым двум точкам
+        self.first_measurement = None
+
+        # Вектор состояния: x, y, vx, vy
         self.state = np.zeros((4, 1), dtype=float)
 
         # Ковариация ошибки состояния
-        self.P = np.eye(4) * 500.0
+        self.P = np.eye(4) * 200.0
 
-        # Шум измерения
+        # Шум измерения: уменьшаем, чтобы быстрее реагировать на новые точки
         self.R = np.array([
-            [9.0, 0.0],
-            [0.0, 9.0]
+            [4.0, 0.0],
+            [0.0, 4.0]
         ], dtype=float)
 
-        # Матрица измерения:
-        # наблюдаем только x и y
+        # Матрица измерения: наблюдаем только x и y
         self.H = np.array([
             [1, 0, 0, 0],
             [0, 1, 0, 0]
@@ -36,21 +37,22 @@ class KalmanCVPredictor:
 
         self.last_t = None
 
-    def initialize(self, x: float, y: float, timestamp: float):
+    def initialize_with_velocity(self, x: float, y: float, vx: float, vy: float, timestamp: float):
         """
-        Инициализация фильтра первой точкой.
+        Инициализация фильтра по двум первым точкам:
+        положение + начальная скорость.
         """
         self.state = np.array([
             [x],
             [y],
-            [0.0],
-            [0.0]
+            [vx],
+            [vy]
         ], dtype=float)
 
         self.P = np.eye(4) * 100.0
         self.last_t = timestamp
         self.initialized = True
-        self.measurement_count = 1
+        self.measurement_count = 2
 
     def _build_F(self, dt: float):
         """
@@ -68,9 +70,10 @@ class KalmanCVPredictor:
             [0, 0, 0, 1]
         ], dtype=float)
 
-    def _build_Q(self, dt: float, q: float = 5.0):
+    def _build_Q(self, dt: float, q: float = 50.0):
         """
         Матрица шума процесса для модели постоянной скорости.
+        Чем больше q, тем менее инерционен фильтр.
         """
         dt2 = dt * dt
         dt3 = dt2 * dt
@@ -86,22 +89,38 @@ class KalmanCVPredictor:
     def update(self, x: float, y: float, timestamp: float):
         """
         Полный шаг Калмана:
-        1) predict
-        2) correct
+        1) если нет ни одной точки — запоминаем первую
+        2) если есть только первая точка — оцениваем начальную скорость и инициализируем фильтр
+        3) иначе обычные predict + correct
         """
-        if not self.initialized:
-            self.initialize(x, y, timestamp)
+        # Первая точка: просто запоминаем
+        if self.first_measurement is None and not self.initialized:
+            self.first_measurement = (x, y, timestamp)
+            self.measurement_count = 1
             return
 
+        # Вторая точка: инициализируем положение и скорость
+        if not self.initialized and self.first_measurement is not None:
+            x0, y0, t0 = self.first_measurement
+            dt = timestamp - t0
+            if dt <= 0:
+                dt = 1e-3
+
+            vx0 = (x - x0) / dt
+            vy0 = (y - y0) / dt
+
+            self.initialize_with_velocity(x, y, vx0, vy0, timestamp)
+            self.first_measurement = None
+            return
+
+        # Обычное обновление
         dt = timestamp - self.last_t
         if dt <= 0:
             dt = 1e-3
-        if dt > 0.1:
-            dt = 0.1
 
         # ---------- Predict ----------
         F = self._build_F(dt)
-        Q = self._build_Q(dt, q=8.0)
+        Q = self._build_Q(dt, q=50.0)
 
         self.state = F @ self.state
         self.P = F @ self.P @ F.T + Q
@@ -118,8 +137,8 @@ class KalmanCVPredictor:
         I = np.eye(4)
         self.P = (I - K @ self.H) @ self.P
 
-        # Ограничение скорости от выбросов
-        MAX_VEL = 2000.0
+        # Ограничение скорости от совсем уж диких выбросов
+        MAX_VEL = 3000.0
         self.state[2, 0] = np.clip(self.state[2, 0], -MAX_VEL, MAX_VEL)
         self.state[3, 0] = np.clip(self.state[3, 0], -MAX_VEL, MAX_VEL)
 
@@ -152,8 +171,6 @@ class KalmanCVPredictor:
 
         if delta_t < 0:
             delta_t = 0.0
-        if delta_t > 0.2:
-            delta_t = 0.2
 
         F = self._build_F(delta_t)
         future_state = F @ self.state
@@ -172,6 +189,7 @@ class KalmanCVPredictor:
         """
         self.initialized = False
         self.measurement_count = 0
+        self.first_measurement = None
         self.state = np.zeros((4, 1), dtype=float)
-        self.P = np.eye(4) * 500.0
+        self.P = np.eye(4) * 200.0
         self.last_t = None
