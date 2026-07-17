@@ -6,33 +6,42 @@ from ultralytics import YOLO
 
 class AppleDetector:
     """
-    Детекция яблока с камеры через YOLO segmentation.
+    Детекция объекта с камеры через YOLO segmentation.
     Без tracking — только стабильная покадровая детекция.
     """
 
-    def __init__(self, model_path="best.pt", camera_index=0, debug_timing=True):
+    def __init__(
+        self,
+        model_path="best_tennis_ball_50epochs.pt",
+        target_class_name="ball",
+        display_name="Tennis Ball",
+        camera_index=0,
+        debug_timing=True,
+        debug_detection=True
+    ):
         print("Загружаем модель YOLO...")
         self.model = YOLO(model_path)
         print("Модель загружена!")
 
+        self.target_class_name = target_class_name
+        self.display_name = display_name
+        self.debug_timing = debug_timing
+        self.debug_detection = debug_detection
+
+        print("Классы модели:", self.model.names)
+        print(f"Ищем класс: {self.target_class_name}")
+
         print("Открываем камеру...")
         self.cap = cv2.VideoCapture(camera_index)
-        
 
         if not self.cap.isOpened():
             raise RuntimeError("ОШИБКА: Камера не найдена!")
 
         print("Камера работает!")
 
-        self.debug_timing = debug_timing
-
     def get_detection(self, conf_threshold=0.6):
         """
-        Считывает кадр и пытается найти яблоко.
-
-        conf_threshold: минимальный порог confidence.
-        timestamp фиксируется в момент получения кадра,
-        а не после завершения inference.
+        Считывает кадр и пытается найти целевой объект.
         """
         t_start = time.time()
 
@@ -40,23 +49,35 @@ class AppleDetector:
         if not ret:
             return None, None
 
-        # Время получения кадра — используем его как timestamp измерения
         t_frame = time.time()
 
-        # YOLO inference
         results = self.model(frame, verbose=False)
 
         best_detection = None
 
-        for r in results:
+        for r_idx, r in enumerate(results):
+            if self.debug_detection:
+                print(f"\n[DEBUG] Result #{r_idx}")
+                print("  boxes exist:", r.boxes is not None)
+                print("  masks exist:", r.masks is not None)
+
+                if r.boxes is not None:
+                    print("  num boxes:", len(r.boxes))
+                if r.masks is not None and hasattr(r.masks, "xy"):
+                    print("  num masks:", len(r.masks.xy))
+
             if r.boxes is None:
                 continue
 
             for i, box in enumerate(r.boxes):
                 class_id = int(box.cls[0])
                 confidence = float(box.conf[0])
+                class_name = self.model.names[class_id]
 
-                if self.model.names[class_id] != "apple":
+                if self.debug_detection:
+                    print(f"    box #{i}: class={class_name}, conf={confidence:.3f}")
+
+                if class_name != self.target_class_name:
                     continue
 
                 if confidence < conf_threshold:
@@ -64,13 +85,17 @@ class AppleDetector:
 
                 x1, y1, x2, y2 = map(int, box.xyxy[0])
 
-                # Пытаемся взять центр по маске сегментации
                 cx, cy, contour = self._get_mask_center(r, i)
 
-                # Если центр по маске не получился — fallback на bbox
                 if cx is None or cy is None:
                     cx = (x1 + x2) // 2
                     cy = (y1 + y2) // 2
+
+                if self.debug_detection:
+                    if contour is not None:
+                        print(f"      -> contour OK, center=({cx}, {cy})")
+                    else:
+                        print(f"      -> contour NONE, fallback bbox center=({cx}, {cy})")
 
                 if best_detection is None or confidence > best_detection["confidence"]:
                     best_detection = {
@@ -80,6 +105,7 @@ class AppleDetector:
                         "confidence": confidence,
                         "bbox": (x1, y1, x2, y2),
                         "contour": contour,
+                        "class_name": class_name,
                     }
 
         t_end = time.time()
@@ -88,6 +114,9 @@ class AppleDetector:
             dt = t_end - t_start
             fps = 1.0 / dt if dt > 1e-6 else 0.0
             print(f"[Detector] frame_time={dt:.4f}s | fps={fps:.2f}")
+
+        if self.debug_detection and best_detection is None:
+            print("[DEBUG] Подходящая детекция не найдена.")
 
         return frame, best_detection
 
@@ -98,6 +127,9 @@ class AppleDetector:
         """
         try:
             if result.masks is None:
+                return None, None, None
+
+            if not hasattr(result.masks, "xy"):
                 return None, None, None
 
             if i >= len(result.masks.xy):
@@ -118,12 +150,14 @@ class AppleDetector:
 
             return cx, cy, contour
 
-        except Exception:
+        except Exception as e:
+            if self.debug_detection:
+                print(f"[DEBUG] Ошибка в _get_mask_center: {e}")
             return None, None, None
 
     def draw_detection(self, frame, detection):
         """
-        Рисует контур яблока, его центр и confidence.
+        Рисует контур объекта, его центр и confidence.
         """
         if detection is None:
             return frame
@@ -134,20 +168,16 @@ class AppleDetector:
         x1, y1, x2, y2 = detection["bbox"]
         contour = detection.get("contour")
 
-        # Если есть контур маски — рисуем его
         if contour is not None:
             cv2.drawContours(frame, [contour], -1, (255, 100, 0), 2)
         else:
-            # Иначе просто рамка
             cv2.rectangle(frame, (x1, y1), (x2, y2), (255, 100, 0), 2)
 
-        # Центр яблока
         cv2.circle(frame, (x, y), 5, (0, 0, 255), -1)
 
-        # Подпись
         cv2.putText(
             frame,
-            f"Apple {conf:.2f}",
+            f"{self.display_name} {conf:.2f}",
             (x1, y1 - 10),
             cv2.FONT_HERSHEY_SIMPLEX,
             0.6,
