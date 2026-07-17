@@ -1,6 +1,8 @@
 path: C:/Users/kalin/Desktop/apple11/apple1/dataset
-train: images/train
-val: images/val
+train: train/images
+val: valid/images
+test: test/images
 
+nc: 1
 names:
   0: apple
