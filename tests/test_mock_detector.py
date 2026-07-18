@@ -65,6 +65,10 @@ class MockDetectorTests(unittest.TestCase):
         self.assertAlmostEqual(at_contact[0], detector.width - detector.radius)
         self.assertLess(after[0], at_contact[0])
 
+    def test_wall_scenario_exposes_only_its_physical_wall(self):
+        detector = MockDetector(trajectory="wall_impact")
+        self.assertEqual(detector.get_collision_environment(), {"right": 0.84})
+
     def test_ballistic_object_leaves_frame_without_a_static_floor_tail(self):
         detector = MockDetector(
             trajectory="ballistic",

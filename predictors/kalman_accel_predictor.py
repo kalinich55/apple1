@@ -8,6 +8,7 @@ from config import (
     KALMAN_INNOVATION_GATE,
     KALMAN_JERK_NOISE,
     KALMAN_MEASUREMENT_STD_PX,
+    KALMAN_REACQUIRE_AFTER_REJECTIONS,
     KALMAN_MIN_POINTS,
 )
 
@@ -26,6 +27,7 @@ class KalmanAccelPredictor:
         measurement_std_px: float = KALMAN_MEASUREMENT_STD_PX,
         jerk_noise: float = KALMAN_JERK_NOISE,
         innovation_gate: float = KALMAN_INNOVATION_GATE,
+        reacquire_after_rejections: int = KALMAN_REACQUIRE_AFTER_REJECTIONS,
         max_velocity: float = 12_000.0,
         max_acceleration: float = 60_000.0,
     ):
@@ -33,10 +35,13 @@ class KalmanAccelPredictor:
             raise ValueError("measurement_std_px must be positive")
         if jerk_noise <= 0:
             raise ValueError("jerk_noise must be positive")
+        if reacquire_after_rejections < 1:
+            raise ValueError("reacquire_after_rejections must be positive")
 
         self.measurement_std_px = float(measurement_std_px)
         self.jerk_noise = float(jerk_noise)
         self.innovation_gate = float(innovation_gate)
+        self.reacquire_after_rejections = int(reacquire_after_rejections)
         self.max_velocity = float(max_velocity)
         self.max_acceleration = float(max_acceleration)
 
@@ -130,6 +135,60 @@ class KalmanAccelPredictor:
         self.initialized = True
         self.measurement_count = 2
         self._first_measurement = None
+        self.last_accepted_measurement = (x, y, timestamp)
+        self.consecutive_rejections = 0
+
+    def _reacquire_from_measurement(self, x: float, y: float, timestamp: float) -> bool:
+        """Recover after a sustained real manoeuvre or collision.
+
+        Innovation gating is useful for one-off segmentation glitches, but a
+        ball that reverses at a wall otherwise gets rejected forever because
+        the stale state keeps moving away from it. Two consecutive rejected
+        points are enough to re-estimate velocity from the last trusted point.
+        """
+        if self.last_accepted_measurement is None:
+            return False
+
+        previous_x, previous_y, previous_t = self.last_accepted_measurement
+        dt = timestamp - previous_t
+        if dt <= 1e-6:
+            return False
+
+        vx = (x - previous_x) / dt
+        vy = (y - previous_y) / dt
+
+        # A collision is an impulse: it can change velocity almost
+        # instantaneously, but it normally does not cancel persistent forces.
+        # For example, after a bounce the vertical velocity reverses while
+        # image-plane gravity still accelerates the ball downwards.  Keep the
+        # previous acceleration as a deliberately uncertain prior instead of
+        # forcing the first forecast after reacquisition to be linear.
+        acceleration_prior = np.nan_to_num(
+            self.state[4:6, 0],
+            nan=0.0,
+            posinf=self.max_acceleration,
+            neginf=-self.max_acceleration,
+        )
+        self.state = np.array(
+            [[x], [y], [vx], [vy], [acceleration_prior[0]], [acceleration_prior[1]]],
+            dtype=float,
+        )
+        self._clamp_state()
+        self.P = np.diag(
+            [
+                self.measurement_std_px**2,
+                self.measurement_std_px**2,
+                30_000.0,
+                30_000.0,
+                300_000.0,
+                300_000.0,
+            ]
+        )
+        self.last_t = timestamp
+        self.last_accepted_measurement = (x, y, timestamp)
+        self.consecutive_rejections = 0
+        self.measurement_count = max(KALMAN_MIN_POINTS, self.measurement_count + 1)
+        return True
 
     def update(self, x: float, y: float, timestamp: float) -> bool:
         """Assimilate one detector point; return ``False`` if it is rejected."""
@@ -144,6 +203,8 @@ class KalmanAccelPredictor:
                 self.state[1, 0] = y
                 self.last_t = timestamp
                 self.measurement_count = 1
+                self.last_accepted_measurement = (x, y, timestamp)
+                self.consecutive_rejections = 0
             else:
                 self._initialize_from_second_measurement(x, y, timestamp)
             return self.initialized
@@ -169,7 +230,11 @@ class KalmanAccelPredictor:
         self.last_t = timestamp
         if mahalanobis_sq > self.innovation_gate:
             # State and covariance are already propagated to the new time;
-            # discard only the implausible measurement.
+            # discard only the implausible measurement. A sustained sequence
+            # is treated as a real manoeuvre rather than permanent noise.
+            self.consecutive_rejections += 1
+            if self.consecutive_rejections >= self.reacquire_after_rejections:
+                return self._reacquire_from_measurement(x, y, timestamp)
             return False
 
         try:
@@ -186,6 +251,8 @@ class KalmanAccelPredictor:
         self.P = 0.5 * (self.P + self.P.T)
         self._clamp_state()
         self.measurement_count += 1
+        self.last_accepted_measurement = (x, y, timestamp)
+        self.consecutive_rejections = 0
         return True
 
     def get_current_state(self):
@@ -209,3 +276,5 @@ class KalmanAccelPredictor:
         self.P = np.eye(6, dtype=float) * 1_000.0
         self.last_t = None
         self._first_measurement = None
+        self.last_accepted_measurement = None
+        self.consecutive_rejections = 0

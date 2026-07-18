@@ -15,6 +15,9 @@ from config import (
     FRAME_WIDTH,
     FRAME_HEIGHT,
     FPS,
+    MOCK_WINDOW_SCALE,
+    COLLISION_REAL_ENABLED,
+    COLLISION_REAL_WALLS,
     get_object_profile,
 )
 from tracker import ObjectTracker
@@ -29,10 +32,9 @@ MIN_CHECKS_TO_SHOW = 5
 VALIDATION_MIN_CONFIDENCE = 0.75
 VALIDATION_EDGE_MARGIN = 25
 VALIDATION_MIN_AREA = 120
-# A constant-acceleration Kalman filter is the most stable common baseline
-# for linear, ballistic and short pendulum segments. Other implementations
-# remain selectable here for comparison.
-PREDICTOR_NAME = "kalman_ca"   # "linear", "poly2", "poly3", "kalman_ca", "kalman_cv"
+# Базовый честный тест: предиктор не знает о стене до столкновения. Вариант
+# "collision_ca" оставлен для отдельного эксперимента с известной геометрией.
+PREDICTOR_NAME = "kalman_ca"  # "linear", "poly2", "poly3", "kalman_ca", "kalman_cv", "collision_ca"
 
 USE_MOCK = True
 MOCK_TRAJECTORY = "linear"
@@ -292,6 +294,22 @@ def run_single_experiment():
                         )
                     )
                     update_result = predictor.update(sx, sy, det_time)
+                    if hasattr(predictor, "set_environment") and detection.get("bbox") is not None:
+                        x1, y1, x2, y2 = detection["bbox"]
+                        radius_px = max(x2 - x1, y2 - y1) / 2.0
+                        if USE_MOCK and hasattr(detector, "get_collision_environment"):
+                            walls = detector.get_collision_environment()
+                            enabled = bool(walls)
+                        else:
+                            walls = COLLISION_REAL_WALLS
+                            enabled = COLLISION_REAL_ENABLED
+                        predictor.set_environment(
+                            frame.shape[1],
+                            frame.shape[0],
+                            radius_px,
+                            walls=walls,
+                            enabled=enabled,
+                        )
                     if update_result is not False:
                         prediction_source_time = det_time
 
@@ -624,7 +642,11 @@ def main():
     print("r=restart current  q=quit\n")
 
     cv2.namedWindow(WINDOW_NAME, cv2.WINDOW_NORMAL)
-    cv2.resizeWindow(WINDOW_NAME, MOCK_WIDTH, MOCK_HEIGHT)
+    cv2.resizeWindow(
+        WINDOW_NAME,
+        int(round(MOCK_WIDTH * MOCK_WINDOW_SCALE)),
+        int(round(MOCK_HEIGHT * MOCK_WINDOW_SCALE)),
+    )
 
     last_frame = np.zeros((MOCK_HEIGHT, MOCK_WIDTH, 3), dtype=np.uint8)
     last_frame[:] = (35, 35, 35)

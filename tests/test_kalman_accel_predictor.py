@@ -1,6 +1,7 @@
 import math
 import unittest
 
+from mock_detector import MockDetector
 from predictors.kalman_accel_predictor import KalmanAccelPredictor
 
 
@@ -63,6 +64,54 @@ class KalmanAccelPredictorTests(unittest.TestCase):
                 errors.append(math.hypot(x_pred - true_x, y_pred - true_y))
 
         self.assertLess(sum(errors) / len(errors), 3.0)
+
+    def test_reacquires_after_a_sudden_direction_reversal(self):
+        predictor = KalmanAccelPredictor()
+        detector = MockDetector(
+            trajectory="bounce",
+            duration_sec=1.4,
+            fps=30,
+            measurement_noise_px=0.0,
+        )
+        saw_rejection = False
+        recovered_upward = False
+
+        while True:
+            frame, detection = detector.get_detection()
+            if frame is None:
+                break
+
+            accepted = predictor.update(
+                detection["x"], detection["y"], detection["timestamp"]
+            )
+            if detection["sim_time"] >= 1.22 and not accepted:
+                saw_rejection = True
+            if saw_rejection and accepted and predictor.is_ready():
+                _, _, _, vy, _, _ = predictor.get_current_state()
+                recovered_upward = vy < 0.0
+
+        self.assertTrue(saw_rejection)
+        self.assertTrue(recovered_upward)
+
+    def test_reacquire_keeps_the_estimated_ballistic_acceleration(self):
+        predictor = KalmanAccelPredictor()
+        dt = 1.0 / 30.0
+
+        # Let the filter estimate a stable gravity-like vertical acceleration.
+        for index in range(45):
+            timestamp = index * dt
+            predictor.update(200.0 * timestamp, 0.5 * 500.0 * timestamp**2, timestamp)
+
+        _, _, _, _, _, ay_before = predictor.get_current_state()
+        self.assertGreater(ay_before, 350.0)
+
+        # Two far-away points trigger reacquisition, as can happen after a
+        # collision or a sharp manoeuvre that crosses the innovation gate.
+        self.assertFalse(predictor.update(10_000.0, 600.0, 45 * dt))
+        self.assertTrue(predictor.update(10_100.0, 620.0, 46 * dt))
+
+        _, _, _, _, _, ay_after = predictor.get_current_state()
+        self.assertAlmostEqual(ay_after, ay_before, delta=1e-6)
 
 
 if __name__ == "__main__":

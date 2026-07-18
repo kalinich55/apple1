@@ -14,6 +14,11 @@ from config import (
     FRAME_WIDTH,
     FRAME_HEIGHT,
     FPS,
+    REAL_WINDOW_SCALE,
+    UI_FONT_SCALE,
+    UI_FONT_THICKNESS,
+    COLLISION_REAL_ENABLED,
+    COLLISION_REAL_WALLS,
     get_object_profile,
 )
 from tracker import ObjectTracker
@@ -28,6 +33,7 @@ VALIDATION_MIN_CONFIDENCE = 0.75
 VALIDATION_EDGE_MARGIN = 25
 VALIDATION_MIN_AREA = 120
 PREDICTOR_NAME = "kalman_ca"  # "linear", "poly2", "poly3", "kalman_ca" "kalman_cv"
+WINDOW_NAME = f"Apple Prediction - {PREDICTOR_NAME}"
 
 
 def run_realtime():
@@ -51,6 +57,7 @@ def run_realtime():
     smooth_buffer = deque(maxlen=SMOOTHING_WINDOW)
     evaluator = PredictionEvaluator(MAX_EVALUATION_GAP)
     missed_in_row = 0
+    window_initialized = False
 
     # ── Метрики детекции ──────────────────────────────────────
     total_frames = 0
@@ -109,6 +116,16 @@ def run_realtime():
         if frame is None:
             print("Не удалось получить кадр.")
             break
+
+        if not window_initialized:
+            h0, w0 = frame.shape[:2]
+            cv2.namedWindow(WINDOW_NAME, cv2.WINDOW_NORMAL)
+            cv2.resizeWindow(
+                WINDOW_NAME,
+                int(round(w0 * REAL_WINDOW_SCALE)),
+                int(round(h0 * REAL_WINDOW_SCALE)),
+            )
+            window_initialized = True
 
         mode = "waiting"
         x_pred = y_pred = None
@@ -173,6 +190,16 @@ def run_realtime():
                         )
                     )
                     update_result = predictor.update(sx, sy, t)
+                    if hasattr(predictor, "set_environment") and bbox is not None:
+                        x1, y1, x2, y2 = bbox
+                        radius_px = max(x2 - x1, y2 - y1) / 2.0
+                        predictor.set_environment(
+                            w_f,
+                            h_f,
+                            radius_px,
+                            walls=COLLISION_REAL_WALLS,
+                            enabled=COLLISION_REAL_ENABLED,
+                        )
                     # Existing regression predictors use ``None`` for a
                     # successful update; Kalman explicitly returns False for
                     # an innovation-gated measurement.
@@ -226,7 +253,7 @@ def run_realtime():
                     frame,
                     f"Pred +{PREDICT_DELTA}s",
                     (xd + 12, yd),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2
+                    cv2.FONT_HERSHEY_SIMPLEX, UI_FONT_SCALE, color, UI_FONT_THICKNESS
                 )
 
                 if current_pos is not None:
@@ -237,19 +264,19 @@ def run_realtime():
                 frame,
                 f"Predictor: {PREDICTOR_NAME}",
                 (10, 55),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 2
+                cv2.FONT_HERSHEY_SIMPLEX, UI_FONT_SCALE, (255, 255, 255), UI_FONT_THICKNESS
             )
             cv2.putText(
                 frame,
                 f"vx={vxk:.1f} vy={vyk:.1f}",
                 (10, 80),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 2
+                cv2.FONT_HERSHEY_SIMPLEX, UI_FONT_SCALE, (255, 255, 255), UI_FONT_THICKNESS
             )
             cv2.putText(
                 frame,
                 f"ax={axk:.1f} ay={ayk:.1f}",
                 (10, 105),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 2
+                cv2.FONT_HERSHEY_SIMPLEX, UI_FONT_SCALE, (255, 255, 255), UI_FONT_THICKNESS
             )
 
         else:
@@ -257,7 +284,7 @@ def run_realtime():
                 frame,
                 f"Predictor: {PREDICTOR_NAME}",
                 (10, 55),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 2
+                cv2.FONT_HERSHEY_SIMPLEX, UI_FONT_SCALE, (255, 255, 255), UI_FONT_THICKNESS
             )
 
         # ── Статус сверху ─────────────────────────────────────
@@ -266,7 +293,7 @@ def run_realtime():
             frame,
             f"Points: {len(tracker)}/{HISTORY_SIZE} | Mode: {mode} | Det: {det_rate:.1f}%",
             (10, 25),
-            cv2.FONT_HERSHEY_SIMPLEX, 0.60, (255, 255, 255), 2
+            cv2.FONT_HERSHEY_SIMPLEX, UI_FONT_SCALE, (255, 255, 255), UI_FONT_THICKNESS
         )
 
         # ── Метрики снизу ─────────────────────────────────────
@@ -294,54 +321,54 @@ def run_realtime():
                     frame,
                     f"All: {checked} | Valid: {valid_checked}",
                     (10, h - 125),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 255), 2
+                    cv2.FONT_HERSHEY_SIMPLEX, UI_FONT_SCALE, (0, 255, 255), UI_FONT_THICKNESS
                 )
                 cv2.putText(
                     frame,
                     f"Mean2D: {avg_err:.1f}px | valid: {valid_avg_err:.1f}px",
                     (10, h - 98),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 255), 2
+                    cv2.FONT_HERSHEY_SIMPLEX, UI_FONT_SCALE, (0, 255, 255), UI_FONT_THICKNESS
                 )
                 cv2.putText(
                     frame,
                     f"RMSE: {rmse:.1f}px | validRMSE: {valid_rmse:.1f}px",
                     (10, h - 71),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 255), 2
+                    cv2.FONT_HERSHEY_SIMPLEX, UI_FONT_SCALE, (0, 255, 255), UI_FONT_THICKNESS
                 )
                 cv2.putText(
                     frame,
                     f"|dX|: {mean_abs_dx:.1f}px | valid|dX|: {valid_mean_abs_dx:.1f}px",
                     (10, h - 44),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 255), 2
+                    cv2.FONT_HERSHEY_SIMPLEX, UI_FONT_SCALE, (0, 255, 255), UI_FONT_THICKNESS
                 )
                 cv2.putText(
                     frame,
                     f"|dY|: {mean_abs_dy:.1f}px | valid|dY|: {valid_mean_abs_dy:.1f}px",
                     (10, h - 17),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 255), 2
+                    cv2.FONT_HERSHEY_SIMPLEX, UI_FONT_SCALE, (0, 255, 255), UI_FONT_THICKNESS
                 )
                 cv2.putText(
                     frame,
                     f"OK: {success_rate:.1f}% | validOK: {valid_success_rate:.1f}%",
                     (10, h - 0),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 255), 2
+                    cv2.FONT_HERSHEY_SIMPLEX, UI_FONT_SCALE, (0, 255, 255), UI_FONT_THICKNESS
                 )
             else:
                 cv2.putText(
                     frame,
                     f"Metrics: collecting... ({checked}/{MIN_CHECKS_TO_SHOW})",
                     (10, h - 30),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 255), 2
+                    cv2.FONT_HERSHEY_SIMPLEX, UI_FONT_SCALE, (0, 255, 255), UI_FONT_THICKNESS
                 )
         else:
             cv2.putText(
                 frame,
                 "Press 'm' for metrics",
                 (10, h - 30),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.55, (220, 220, 220), 2
+                cv2.FONT_HERSHEY_SIMPLEX, UI_FONT_SCALE, (220, 220, 220), UI_FONT_THICKNESS
             )
 
-        cv2.imshow(f"Apple Prediction - {PREDICTOR_NAME}", frame)
+        cv2.imshow(WINDOW_NAME, frame)
         key = cv2.waitKey(1) & 0xFF
         if key == ord("q"):
             break

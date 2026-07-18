@@ -225,6 +225,19 @@ class MockDetector:
             return x, y, visible
         return None
 
+    def get_collision_environment(self):
+        """Return known physical walls for the current mock scenario."""
+        if self.trajectory == "wall_impact":
+            return {"right": 0.84}
+        if self.trajectory == "bounce":
+            return {
+                "left": 0.84,
+                "right": 0.84,
+                "top": 0.84,
+                "bottom": 0.68,
+            }
+        return {}
+
     def _simulate_bounce_step(self):
         """Advance a ball in a closed box, including a stable resting state."""
         dt = self.dt

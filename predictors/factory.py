@@ -3,6 +3,7 @@ from .poly2_predictor import Poly2Predictor
 from .poly3_predictor import Poly3Predictor
 from .kalman_accel_predictor import KalmanAccelPredictor
 from .kalman_cv_predictor import KalmanCVPredictor
+from .collision_aware_predictor import CollisionAwarePredictor
 
 
 def create_predictor(name):
@@ -18,5 +19,7 @@ def create_predictor(name):
         return KalmanAccelPredictor()
     elif name == "kalman_cv":
         return KalmanCVPredictor()
+    elif name == "collision_ca":
+        return CollisionAwarePredictor()
     else:
         raise ValueError(f"Unknown predictor: {name}")

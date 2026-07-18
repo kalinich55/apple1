@@ -3,6 +3,7 @@ import time
 from pathlib import Path
 import numpy as np
 from detection_geometry import estimate_center
+from config import UI_FONT_SCALE, UI_FONT_THICKNESS
 
 
 class AppleDetector:
@@ -54,7 +55,12 @@ class AppleDetector:
         if fps is not None:
             self.cap.set(cv2.CAP_PROP_FPS, float(fps))
 
+        actual_width = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        actual_height = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        actual_fps = float(self.cap.get(cv2.CAP_PROP_FPS))
+
         print("Камера работает!")
+        print(f"Фактический режим камеры: {actual_width}x{actual_height} @ {actual_fps:.1f} FPS")
 
     def get_detection(self, conf_threshold=0.6):
         """
@@ -200,9 +206,9 @@ class AppleDetector:
             f"{self.display_name} {conf:.2f}",
             (x1, y1 - 10),
             cv2.FONT_HERSHEY_SIMPLEX,
-            0.6,
+            UI_FONT_SCALE,
             (255, 100, 0),
-            2
+            UI_FONT_THICKNESS
         )
 
         return frame

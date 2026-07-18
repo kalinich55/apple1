@@ -17,6 +17,18 @@ KALMAN_MIN_POINTS = 2
 KALMAN_MEASUREMENT_STD_PX = 3.0
 KALMAN_JERK_NOISE = 12_000.0
 KALMAN_INNOVATION_GATE = 36.0
+# После нескольких подряд статистически невозможных измерений считаем, что
+# траектория резко изменилась (например, удар) и переинициализируем скорость.
+KALMAN_REACQUIRE_AFTER_REJECTIONS = 2
+
+# Параметры модели столкновений. В реальном режиме она выключена, пока не
+# задана измеренная геометрия стены/пола; в mock геометрия известна точно.
+COLLISION_REAL_ENABLED = False
+COLLISION_DEFAULT_RESTITUTION = 0.84
+COLLISION_MAX_EVENTS = 4
+# Example for a calibrated real wall: {"right": 0.84}. Keep empty until the
+# image boundary is known to coincide with an actual physical surface.
+COLLISION_REAL_WALLS = {}
 
 # Размер истории для разных предикторов
 LINEAR_HISTORY_SIZE = 3
@@ -51,10 +63,22 @@ SMOOTHING_WINDOW = 1
 MAX_MISSED_FRAMES = 3
 
 # Камера
-FRAME_WIDTH = 640
-FRAME_HEIGHT = 480
+# Ноутбучные вебки обычно выглядят заметно лучше в 16:9, чем в принудительном
+# 640x480 (4:3), которое визуально сужает область и портит картинку.
+FRAME_WIDTH = 1600
+FRAME_HEIGHT = 900
 FPS = 30
 CAMERA_INDEX = 0
+
+# Отображение окна реальной камеры. Меняет только размер окна на экране, а не
+# данные, которые получает нейросеть.
+REAL_WINDOW_SCALE = 1.0
+
+# Окно тестового mock-режима (`main_mock.py`). Режимы 1--5 используют именно
+# эту настройку; она не влияет на окно живой камеры в `main.py`.
+MOCK_WINDOW_SCALE = 2.0
+UI_FONT_SCALE = 0.85
+UI_FONT_THICKNESS = 2
 
 # Профиль целевого объекта. Чтобы переключить проект на теннисный мяч,
 # поменяйте OBJECT_PROFILE на "tennis_ball" (или "tennis_ball_alt" для
