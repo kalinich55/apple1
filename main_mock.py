@@ -19,7 +19,10 @@ from predictors.factory import create_predictor
 
 SUCCESS_THRESHOLD = 20.0
 MIN_CHECKS_TO_SHOW = 5
-PREDICTOR_NAME = "kalman_cv"   # "linear", "poly2", "poly3", "kalman_ca", "kalman_cv"
+VALIDATION_MIN_CONFIDENCE = 0.75
+VALIDATION_EDGE_MARGIN = 25
+VALIDATION_MIN_AREA = 120
+PREDICTOR_NAME = "poly3"   # "linear", "poly2", "poly3", "kalman_ca", "kalman_cv"
 
 USE_MOCK = True
 MOCK_TRAJECTORY = "linear"
@@ -60,7 +63,7 @@ def print_header():
 
 
 def print_metrics(total_frames, detected_frames, missed_frames, confidences,
-                  dx_list, dy_list, error_list, success_count):
+                  dx_list, dy_list, abs_dx_list, abs_dy_list, error_list, success_count):
     print("\n" + "=" * 60)
     print("  ИТОГОВЫЕ МЕТРИКИ")
     print("=" * 60)
@@ -85,11 +88,15 @@ def print_metrics(total_frames, detected_frames, missed_frames, confidences,
         std_error = float(np.std(error_list))
         mean_dx = float(np.mean(dx_list))
         mean_dy = float(np.mean(dy_list))
+        mean_abs_dx = float(np.mean(abs_dx_list)) if abs_dx_list else 0.0
+        mean_abs_dy = float(np.mean(abs_dy_list)) if abs_dy_list else 0.0
         success_rate = success_count / len(error_list) * 100.0
 
         print(f"Проверено прогнозов               : {len(error_list)}")
         print(f"Среднее отклонение по X           : {mean_dx:.2f} px")
         print(f"Среднее отклонение по Y           : {mean_dy:.2f} px")
+        print(f"Среднее |dX|                     : {mean_abs_dx:.2f} px")
+        print(f"Среднее |dY|                     : {mean_abs_dy:.2f} px")
         print(f"MAE                               : {mae:.2f} px")
         print(f"RMSE                              : {rmse:.2f} px")
         print(f"Стандартное отклонение            : {std_error:.2f} px")
@@ -118,8 +125,17 @@ def run_single_experiment():
 
     dx_list = []
     dy_list = []
+    abs_dx_list = []
+    abs_dy_list = []
     error_list = []
+    valid_error_list = []
+    valid_dx_list = []
+    valid_dy_list = []
+    valid_abs_dx_list = []
+    valid_abs_dy_list = []
     success_count = 0
+    valid_success_count = 0
+    show_metrics = False
 
     experiment_start = time.time()
     last_frame = np.zeros((MOCK_HEIGHT, MOCK_WIDTH, 3), dtype=np.uint8)
@@ -145,6 +161,7 @@ def run_single_experiment():
         y_pred = None
         current_pos = None
         current_eval_time = None
+        current_eval_valid = False
 
         if detection is not None:
             missed_in_row = 0
@@ -265,6 +282,25 @@ def run_single_experiment():
                 missed_in_row = 0
 
         if current_pos is not None and current_eval_time is not None:
+            detection_conf = float(detection["confidence"]) if detection is not None else 0.0
+            bbox = detection.get("bbox") if detection is not None else None
+            h_f, w_f = frame.shape[:2]
+            current_eval_valid = False
+
+            if bbox is not None and detection_conf >= VALIDATION_MIN_CONFIDENCE:
+                x1, y1, x2, y2 = bbox
+                box_w = max(0, x2 - x1)
+                box_h = max(0, y2 - y1)
+                box_area = box_w * box_h
+                if (
+                    x1 >= VALIDATION_EDGE_MARGIN and
+                    y1 >= VALIDATION_EDGE_MARGIN and
+                    x2 <= w_f - VALIDATION_EDGE_MARGIN and
+                    y2 <= h_f - VALIDATION_EDGE_MARGIN and
+                    box_area >= VALIDATION_MIN_AREA
+                ):
+                    current_eval_valid = True
+
             while pending_predictions and current_eval_time >= pending_predictions[0]["target_time"]:
                 pred = pending_predictions.popleft()
                 x_true, y_true = current_pos
@@ -275,7 +311,19 @@ def run_single_experiment():
 
                 dx_list.append(dx)
                 dy_list.append(dy)
+                abs_dx_list.append(abs(dx))
+                abs_dy_list.append(abs(dy))
                 error_list.append(error)
+
+                if current_eval_valid:
+                    valid_error_list.append(error)
+                    valid_dx_list.append(dx)
+                    valid_dy_list.append(dy)
+                    valid_abs_dx_list.append(abs(dx))
+                    valid_abs_dy_list.append(abs(dy))
+
+                    if error <= SUCCESS_THRESHOLD:
+                        valid_success_count += 1
 
                 if error <= SUCCESS_THRESHOLD:
                     success_count += 1
@@ -299,38 +347,88 @@ def run_single_experiment():
             )
             cv2.putText(
                 frame,
-                "1-linear 2-ballistic 3-pendulum 4-bounce | r-restart | q-quit",
+                "1-linear 2-ballistic 3-pendulum 4-bounce | m-metrics | r-restart | q-quit",
                 (10, 155),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.52, (180, 255, 180), 2
             )
 
         h, w = frame.shape[:2]
         checked = len(error_list)
+        key = cv2.waitKey(1) & 0xFF
 
-        if checked >= MIN_CHECKS_TO_SHOW:
-            avg_err = float(np.mean(error_list))
-            rmse = float(np.sqrt(np.mean(np.square(error_list))))
-            mean_dx = float(np.mean(dx_list))
-            mean_dy = float(np.mean(dy_list))
-            success_rate = success_count / checked * 100.0
+        if key == ord("q"):
+            detector.release()
+            return "quit", last_frame
 
+        if key == ord("m"):
+            show_metrics = not show_metrics
+
+        if show_metrics:
+            if checked >= MIN_CHECKS_TO_SHOW:
+                avg_err = float(np.mean(error_list))
+                rmse = float(np.sqrt(np.mean(np.square(error_list))))
+                mean_dx = float(np.mean(dx_list))
+                mean_dy = float(np.mean(dy_list))
+                mean_abs_dx = float(np.mean(abs_dx_list))
+                mean_abs_dy = float(np.mean(abs_dy_list))
+                success_rate = success_count / checked * 100.0
+
+                valid_checked = len(valid_error_list)
+                valid_avg_err = float(np.mean(valid_error_list)) if valid_error_list else 0.0
+                valid_rmse = float(np.sqrt(np.mean(np.square(valid_error_list)))) if valid_error_list else 0.0
+                valid_mean_abs_dx = float(np.mean(valid_abs_dx_list)) if valid_abs_dx_list else 0.0
+                valid_mean_abs_dy = float(np.mean(valid_abs_dy_list)) if valid_abs_dy_list else 0.0
+                valid_success_rate = valid_success_count / valid_checked * 100.0 if valid_checked > 0 else 0.0
+
+                cv2.putText(
+                    frame,
+                    f"All: {checked} | Valid: {valid_checked}",
+                    (10, h - 125),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 255), 2
+                )
+                cv2.putText(
+                    frame,
+                    f"MAE: {avg_err:.1f}px | validMAE: {valid_avg_err:.1f}px",
+                    (10, h - 98),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 255), 2
+                )
+                cv2.putText(
+                    frame,
+                    f"RMSE: {rmse:.1f}px | validRMSE: {valid_rmse:.1f}px",
+                    (10, h - 71),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 255), 2
+                )
+                cv2.putText(
+                    frame,
+                    f"|dX|: {mean_abs_dx:.1f}px | valid|dX|: {valid_mean_abs_dx:.1f}px",
+                    (10, h - 44),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 255), 2
+                )
+                cv2.putText(
+                    frame,
+                    f"|dY|: {mean_abs_dy:.1f}px | valid|dY|: {valid_mean_abs_dy:.1f}px",
+                    (10, h - 17),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 255), 2
+                )
+                cv2.putText(
+                    frame,
+                    f"OK: {success_rate:.1f}% | validOK: {valid_success_rate:.1f}%",
+                    (10, h - 0),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 255), 2
+                )
+            else:
+                cv2.putText(
+                    frame,
+                    f"Metrics: collecting... ({checked}/{MIN_CHECKS_TO_SHOW})",
+                    (10, h - 30),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 255), 2
+                )
+        else:
             cv2.putText(
                 frame,
-                f"Checked: {checked}",
-                (10, h - 85),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 255), 2
-            )
-            cv2.putText(
-                frame,
-                f"AvgErr: {avg_err:.1f}px | RMSE: {rmse:.1f}px",
-                (10, h - 58),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 255), 2
-            )
-            cv2.putText(
-                frame,
-                f"dX: {mean_dx:.1f}px | dY: {mean_dy:.1f}px | OK: {success_rate:.1f}%",
+                "Press 'm' for metrics",
                 (10, h - 30),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 255), 2
+                cv2.FONT_HERSHEY_SIMPLEX, 0.55, (220, 220, 220), 2
             )
 
         cv2.putText(
@@ -342,11 +440,6 @@ def run_single_experiment():
 
         cv2.imshow(WINDOW_NAME, frame)
         last_frame = frame.copy()
-
-        key = cv2.waitKey(1) & 0xFF
-        if key == ord("q"):
-            detector.release()
-            return "quit", last_frame
 
         if USE_MOCK and key == ord("1"):
             detector.release()
@@ -368,7 +461,7 @@ def run_single_experiment():
 
     print_metrics(
         total_frames, detected_frames, missed_frames, confidences,
-        dx_list, dy_list, error_list, success_count
+        dx_list, dy_list, abs_dx_list, abs_dy_list, error_list, success_count
     )
 
     return "finished", last_frame
