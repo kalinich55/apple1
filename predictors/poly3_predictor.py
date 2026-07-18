@@ -1,4 +1,5 @@
 import numpy as np
+import warnings
 from collections import deque
 from config import POLY3_HISTORY_SIZE, POLY3_MIN_POINTS
 from .base_predictor import BasePredictor
@@ -28,8 +29,25 @@ class Poly3Predictor(BasePredictor):
         xs = np.array([p[0] for p in data], dtype=np.float64)
         ys = np.array([p[1] for p in data], dtype=np.float64)
 
-        coef_x = np.polyfit(ts, xs, 3)
-        coef_y = np.polyfit(ts, ys, 3)
+        if (
+            not np.all(np.isfinite(ts))
+            or not np.all(np.isfinite(xs))
+            or not np.all(np.isfinite(ys))
+            or len(np.unique(ts)) < POLY3_MIN_POINTS
+            or np.ptp(ts) <= 1e-6
+        ):
+            return None
+
+        try:
+            with warnings.catch_warnings():
+                warnings.simplefilter("error", np.exceptions.RankWarning)
+                coef_x = np.polyfit(ts, xs, 3)
+                coef_y = np.polyfit(ts, ys, 3)
+        except (np.linalg.LinAlgError, ValueError, FloatingPointError, np.exceptions.RankWarning):
+            return None
+
+        if not (np.all(np.isfinite(coef_x)) and np.all(np.isfinite(coef_y))):
+            return None
 
         return t0, coef_x, coef_y
 

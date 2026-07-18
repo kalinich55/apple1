@@ -1,6 +1,7 @@
 from collections import deque
+import math
 import time
-from config import HISTORY_SIZE, MAX_JUMP_PX
+from config import HISTORY_SIZE, MAX_SPEED_PX_PER_SEC, JUMP_MARGIN_PX
 
 
 class ObjectTracker:
@@ -31,14 +32,29 @@ class ObjectTracker:
         Возвращает True если точка принята, False если отфильтрована.
         """
         if timestamp is None:
-            timestamp = time.time()
+            timestamp = time.perf_counter()
 
-        # Фильтр: слишком большой скачок — выброс
+        if not all(math.isfinite(value) for value in (x, y, timestamp)):
+            print("  [tracker] Некорректная точка отфильтрована")
+            return False
+
+        # Фильтр: допустимый сдвиг должен зависеть от интервала между
+        # кадрами. Иначе быстрый мяч ошибочно считается выбросом, а при
+        # высокой частоте кадров разрешается слишком большой скачок.
         if len(self.history) > 0:
             last = self.history[-1]
+            dt = timestamp - last[0]
+            if dt <= 0:
+                print(f"  [tracker] Неупорядоченный timestamp отфильтрован: dt={dt:.6f}с")
+                return False
+
             dist = ((x - last[1])**2 + (y - last[2])**2) ** 0.5
-            if dist > MAX_JUMP_PX:
-                print(f"  [tracker] Выброс отфильтрован: скачок {dist:.1f}px")
+            max_distance = JUMP_MARGIN_PX + MAX_SPEED_PX_PER_SEC * dt
+            if dist > max_distance:
+                print(
+                    "  [tracker] Выброс отфильтрован: "
+                    f"скачок {dist:.1f}px > {max_distance:.1f}px за {dt:.3f}с"
+                )
                 return False
 
         self.history.append((timestamp, x, y))

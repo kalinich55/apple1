@@ -1,6 +1,6 @@
 import unittest
 
-from detector import estimate_center
+from detection_geometry import estimate_center
 
 
 class EstimateCenterTests(unittest.TestCase):

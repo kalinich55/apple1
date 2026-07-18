@@ -1,4 +1,5 @@
-path: C:/Users/kalin/Desktop/apple11/apple1/dataset
+# Relative path keeps the project portable between macOS, Windows and Linux.
+path: dataset
 train: train/images
 val: valid/images
 test: test/images

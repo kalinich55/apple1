@@ -1,47 +1,8 @@
 import cv2
 import time
+from pathlib import Path
 import numpy as np
-from ultralytics import YOLO
-
-
-def estimate_center(mask_center, bbox, confidence):
-    """
-    Возвращает более устойчивую точку центра объекта.
-
-    Если центроид маски сильно расходится с центром bbox, значит
-    маска, вероятно, частично скрыта или смещена; в этом случае
-    используем bbox center. Иначе — смешиваем обе точки.
-    """
-    if mask_center is None:
-        x1, y1, x2, y2 = bbox
-        return (float((x1 + x2) / 2.0), float((y1 + y2) / 2.0))
-
-    x1, y1, x2, y2 = bbox
-    bbox_cx = (x1 + x2) / 2.0
-    bbox_cy = (y1 + y2) / 2.0
-    mask_cx, mask_cy = mask_center
-
-    shift = np.hypot(mask_cx - bbox_cx, mask_cy - bbox_cy)
-    box_diag = np.hypot(x2 - x1, y2 - y1)
-
-    if box_diag <= 1.0:
-        return (float(mask_cx), float(mask_cy))
-
-    if shift > max(18.0, 0.35 * box_diag):
-        return (float(bbox_cx), float(bbox_cy))
-
-    if confidence >= 0.9:
-        mask_weight = 0.7
-    elif confidence >= 0.8:
-        mask_weight = 0.6
-    else:
-        mask_weight = 0.5
-
-    bbox_weight = 1.0 - mask_weight
-    return (
-        float(mask_cx * mask_weight + bbox_cx * bbox_weight),
-        float(mask_cy * mask_weight + bbox_cy * bbox_weight),
-    )
+from detection_geometry import estimate_center
 
 
 class AppleDetector:
@@ -56,11 +17,20 @@ class AppleDetector:
         target_class_name="apple",
         display_name="Apple",
         camera_index=0,
-        debug_timing=True,
-        debug_detection=True
+        frame_width=None,
+        frame_height=None,
+        fps=None,
+        debug_timing=False,
+        debug_detection=False,
     ):
+        # Lazy import keeps pure modules/tests usable without loading the
+        # heavyweight ML stack until the real camera path is started.
+        from ultralytics import YOLO
+
         print("Загружаем модель YOLO...")
-        self.model = YOLO(model_path)
+        project_model_path = Path(__file__).resolve().parent / model_path
+        resolved_model_path = project_model_path if project_model_path.exists() else model_path
+        self.model = YOLO(resolved_model_path)
         print("Модель загружена!")
 
         self.target_class_name = target_class_name
@@ -77,19 +47,26 @@ class AppleDetector:
         if not self.cap.isOpened():
             raise RuntimeError("ОШИБКА: Камера не найдена!")
 
+        if frame_width is not None:
+            self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, int(frame_width))
+        if frame_height is not None:
+            self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, int(frame_height))
+        if fps is not None:
+            self.cap.set(cv2.CAP_PROP_FPS, float(fps))
+
         print("Камера работает!")
 
     def get_detection(self, conf_threshold=0.6):
         """
         Считывает кадр и пытается найти целевой объект.
         """
-        t_start = time.time()
+        t_start = time.perf_counter()
 
         ret, frame = self.cap.read()
         if not ret:
             return None, None
 
-        t_frame = time.time()
+        t_frame = time.perf_counter()
 
         results = self.model(frame, verbose=False)
 
@@ -151,7 +128,7 @@ class AppleDetector:
                         "class_name": class_name,
                     }
 
-        t_end = time.time()
+        t_end = time.perf_counter()
 
         if self.debug_timing:
             dt = t_end - t_start

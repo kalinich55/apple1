@@ -1,5 +1,4 @@
 import cv2
-import time
 import math
 import numpy as np
 from collections import deque
@@ -10,10 +9,17 @@ from config import (
     MIN_CONFIDENCE,
     SMOOTHING_WINDOW,
     MAX_MISSED_FRAMES,
+    MAX_EVALUATION_GAP,
+    CAMERA_INDEX,
+    FRAME_WIDTH,
+    FRAME_HEIGHT,
+    FPS,
+    get_object_profile,
 )
 from tracker import ObjectTracker
 from detector import AppleDetector
 from predictors.factory import create_predictor
+from prediction_evaluator import PredictionEvaluator
 
 
 SUCCESS_THRESHOLD = 20.0   # пикселей — порог "успешного" прогноза
@@ -32,12 +38,18 @@ def run_realtime():
     print("=" * 60 + "\n")
 
     tracker = ObjectTracker()
-    detector = AppleDetector()
+    object_profile = get_object_profile()
+    detector = AppleDetector(
+        camera_index=CAMERA_INDEX,
+        frame_width=FRAME_WIDTH,
+        frame_height=FRAME_HEIGHT,
+        fps=FPS,
+        **object_profile,
+    )
     predictor = create_predictor(PREDICTOR_NAME)
 
     smooth_buffer = deque(maxlen=SMOOTHING_WINDOW)
-    pending_predictions = deque()
-    last_detection_time = None
+    evaluator = PredictionEvaluator(MAX_EVALUATION_GAP)
     missed_in_row = 0
 
     # ── Метрики детекции ──────────────────────────────────────
@@ -61,6 +73,33 @@ def run_realtime():
     valid_success_count = 0
     show_metrics = False
 
+    def record_evaluations(evaluations):
+        nonlocal success_count, valid_success_count
+
+        for evaluation in evaluations:
+            dx = evaluation.dx
+            dy = evaluation.dy
+            error = evaluation.error
+
+            dx_list.append(dx)
+            dy_list.append(dy)
+            abs_dx_list.append(abs(dx))
+            abs_dy_list.append(abs(dy))
+            error_list.append(error)
+
+            if evaluation.valid:
+                valid_error_list.append(error)
+                valid_dx_list.append(dx)
+                valid_dy_list.append(dy)
+                valid_abs_dx_list.append(abs(dx))
+                valid_abs_dy_list.append(abs(dy))
+
+                if error <= SUCCESS_THRESHOLD:
+                    valid_success_count += 1
+
+            if error <= SUCCESS_THRESHOLD:
+                success_count += 1
+
     print("Нажмите 'q' для выхода, 'm' — показать/скрыть метрики\n")
 
     while True:
@@ -71,37 +110,74 @@ def run_realtime():
             print("Не удалось получить кадр.")
             break
 
-        current_time = time.time()
         mode = "waiting"
         x_pred = y_pred = None
         current_pos = None
-        current_eval_valid = False
+        prediction_source_time = None
 
         if detection is not None:
             missed_in_row = 0
 
-            raw_x = detection["x"]
-            raw_y = detection["y"]
-            t = detection["timestamp"]
-            conf = detection["confidence"]
+            raw_x = float(detection["x"])
+            raw_y = float(detection["y"])
+            t = float(detection["timestamp"])
+            conf = float(detection["confidence"])
 
             detected_frames += 1
             confidences.append(conf)
 
-            # Сглаживание координат
-            smooth_buffer.append((raw_x, raw_y))
-            sx = int(np.mean([p[0] for p in smooth_buffer]))
-            sy = int(np.mean([p[1] for p in smooth_buffer]))
-
-            detection["x"] = sx
-            detection["y"] = sy
-            current_pos = (sx, sy)
-
+            # По умолчанию рисуем исходный центр; в предиктор попадают только
+            # уверенные точки, принятые фильтром выбросов.
+            detection["x"] = int(round(raw_x))
+            detection["y"] = int(round(raw_y))
             if conf >= MIN_CONFIDENCE:
-                tracker.add_point(sx, sy, timestamp=t, confidence=conf)
-                predictor.update(sx, sy, t)
-                last_detection_time = t
+                # Reject the raw detector point before smoothing. Otherwise a
+                # large outlier can be diluted by a moving average and leak
+                # into the predictor on the next frame.
+                accepted = tracker.add_point(raw_x, raw_y, timestamp=t, confidence=conf)
 
+                if accepted:
+                    smooth_buffer.append((raw_x, raw_y))
+                    sx = float(np.mean([p[0] for p in smooth_buffer]))
+                    sy = float(np.mean([p[1] for p in smooth_buffer]))
+                    detection["x"] = int(round(sx))
+                    detection["y"] = int(round(sy))
+                    current_pos = (detection["x"], detection["y"])
+
+                    bbox = detection.get("bbox")
+                    h_f, w_f = frame.shape[:2]
+                    current_eval_valid = False
+                    if bbox is not None and conf >= VALIDATION_MIN_CONFIDENCE:
+                        x1, y1, x2, y2 = bbox
+                        box_w = max(0, x2 - x1)
+                        box_h = max(0, y2 - y1)
+                        box_area = box_w * box_h
+                        current_eval_valid = (
+                            x1 >= VALIDATION_EDGE_MARGIN
+                            and y1 >= VALIDATION_EDGE_MARGIN
+                            and x2 <= w_f - VALIDATION_EDGE_MARGIN
+                            and y2 <= h_f - VALIDATION_EDGE_MARGIN
+                            and box_area >= VALIDATION_MIN_AREA
+                        )
+
+                    # The raw segmentation center is the best available
+                    # ground truth in real mode.  Predictor input may be
+                    # smoothed, but its error is measured against the actual
+                    # detector observation at the target timestamp.
+                    record_evaluations(
+                        evaluator.observe(
+                            t,
+                            raw_x,
+                            raw_y,
+                            valid=current_eval_valid,
+                        )
+                    )
+                    update_result = predictor.update(sx, sy, t)
+                    # Existing regression predictors use ``None`` for a
+                    # successful update; Kalman explicitly returns False for
+                    # an innovation-gated measurement.
+                    if update_result is not False:
+                        prediction_source_time = t
             frame = detector.draw_detection(frame, detection)
 
         else:
@@ -112,6 +188,7 @@ def run_realtime():
                 smooth_buffer.clear()
                 tracker.clear()
                 predictor.reset()
+                evaluator.reset()
 
         # ── Прогноз ───────────────────────────────────────────
         if predictor.is_ready():
@@ -125,13 +202,16 @@ def run_realtime():
                 mode = "moving"
                 x_pred, y_pred = predictor.predict_future(PREDICT_DELTA)
 
-            # Сохраняем прогноз для последующей проверки
-            if current_pos is not None and x_pred is not None and y_pred is not None:
-                pending_predictions.append({
-                    "target_time": current_time + PREDICT_DELTA,
-                    "x_pred": float(x_pred),
-                    "y_pred": float(y_pred),
-                })
+            # Queue only a prediction originating from a newly accepted frame.
+            # Its target is expressed on the camera timestamp scale, not on
+            # the slower UI/inference clock.
+            if prediction_source_time is not None and x_pred is not None and y_pred is not None:
+                evaluator.add_prediction(
+                    prediction_source_time,
+                    PREDICT_DELTA,
+                    x_pred,
+                    y_pred,
+                )
 
             # Рисуем прогноз
             if x_pred is not None and y_pred is not None:
@@ -180,53 +260,6 @@ def run_realtime():
                 cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 2
             )
 
-        # ── Проверяем прогнозы, срок которых наступил ─────────
-        if current_pos is not None:
-            detection_conf = float(detection["confidence"]) if detection is not None else 0.0
-            bbox = detection.get("bbox") if detection is not None else None
-            h_f, w_f = frame.shape[:2]
-            current_eval_valid = False
-
-            if bbox is not None and detection_conf >= VALIDATION_MIN_CONFIDENCE:
-                x1, y1, x2, y2 = bbox
-                box_w = max(0, x2 - x1)
-                box_h = max(0, y2 - y1)
-                box_area = box_w * box_h
-                if (
-                    x1 >= VALIDATION_EDGE_MARGIN and
-                    y1 >= VALIDATION_EDGE_MARGIN and
-                    x2 <= w_f - VALIDATION_EDGE_MARGIN and
-                    y2 <= h_f - VALIDATION_EDGE_MARGIN and
-                    box_area >= VALIDATION_MIN_AREA
-                ):
-                    current_eval_valid = True
-
-            while pending_predictions and current_time >= pending_predictions[0]["target_time"]:
-                pred = pending_predictions.popleft()
-                x_true, y_true = current_pos
-                dx = pred["x_pred"] - x_true
-                dy = pred["y_pred"] - y_true
-                error = math.sqrt(dx**2 + dy**2)
-
-                dx_list.append(dx)
-                dy_list.append(dy)
-                abs_dx_list.append(abs(dx))
-                abs_dy_list.append(abs(dy))
-                error_list.append(error)
-
-                if current_eval_valid:
-                    valid_error_list.append(error)
-                    valid_dx_list.append(dx)
-                    valid_dy_list.append(dy)
-                    valid_abs_dx_list.append(abs(dx))
-                    valid_abs_dy_list.append(abs(dy))
-
-                    if error <= SUCCESS_THRESHOLD:
-                        valid_success_count += 1
-
-                if error <= SUCCESS_THRESHOLD:
-                    success_count += 1
-
         # ── Статус сверху ─────────────────────────────────────
         det_rate = (detected_frames / total_frames * 100) if total_frames > 0 else 0.0
         cv2.putText(
@@ -239,12 +272,6 @@ def run_realtime():
         # ── Метрики снизу ─────────────────────────────────────
         h, w = frame.shape[:2]
         checked = len(error_list)
-        key = cv2.waitKey(1) & 0xFF
-
-        if key == ord("q"):
-            break
-        if key == ord("m"):
-            show_metrics = not show_metrics
 
         if show_metrics:
             if checked >= MIN_CHECKS_TO_SHOW:
@@ -271,7 +298,7 @@ def run_realtime():
                 )
                 cv2.putText(
                     frame,
-                    f"MAE: {avg_err:.1f}px | validMAE: {valid_avg_err:.1f}px",
+                    f"Mean2D: {avg_err:.1f}px | valid: {valid_avg_err:.1f}px",
                     (10, h - 98),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 255), 2
                 )
@@ -315,6 +342,11 @@ def run_realtime():
             )
 
         cv2.imshow(f"Apple Prediction - {PREDICTOR_NAME}", frame)
+        key = cv2.waitKey(1) & 0xFF
+        if key == ord("q"):
+            break
+        if key == ord("m"):
+            show_metrics = not show_metrics
 
     detector.release()
 
@@ -332,12 +364,16 @@ def run_realtime():
     print(f"Кадров без детекции               : {missed_frames}")
     print(f"Detection rate                    : {det_rate:.2f}%")
     print(f"Средний confidence                : {avg_conf:.3f}")
+    print(f"Пропущено из-за разрыва кадров    : {evaluator.skipped_predictions}")
+    print(f"Не проверено в конце серии        : {evaluator.pending_count}")
 
     if error_list:
         mae = np.mean(error_list)
         rmse = np.sqrt(np.mean(np.square(error_list)))
         max_error = np.max(error_list)
         std_error = np.std(error_list)
+        median_error = np.median(error_list)
+        p95_error = np.percentile(error_list, 95)
         mean_dx = np.mean(dx_list)
         mean_dy = np.mean(dy_list)
         mean_abs_dx = np.mean(abs_dx_list)
@@ -355,7 +391,9 @@ def run_realtime():
         print(f"Среднее отклонение по Y           : {mean_dy:.2f} px")
         print(f"Среднее |dX|                     : {mean_abs_dx:.2f} px")
         print(f"Среднее |dY|                     : {mean_abs_dy:.2f} px")
-        print(f"MAE                               : {mae:.2f} px")
+        print(f"Средняя 2D-ошибка                 : {mae:.2f} px")
+        print(f"Медианная 2D-ошибка               : {median_error:.2f} px")
+        print(f"P95 2D-ошибки                     : {p95_error:.2f} px")
         print(f"RMSE                              : {rmse:.2f} px")
         print(f"Стандартное отклонение            : {std_error:.2f} px")
         print(f"Максимальная ошибка               : {max_error:.2f} px")
@@ -364,7 +402,7 @@ def run_realtime():
         print(f"Проверено валидных прогнозов      : {len(valid_error_list)}")
         print(f"Среднее |dX| (valid)              : {valid_mean_abs_dx:.2f} px")
         print(f"Среднее |dY| (valid)              : {valid_mean_abs_dy:.2f} px")
-        print(f"MAE (valid)                       : {valid_mae:.2f} px")
+        print(f"Средняя 2D-ошибка (valid)         : {valid_mae:.2f} px")
         print(f"RMSE (valid)                      : {valid_rmse:.2f} px")
         print(f"Success rate (valid)              : {valid_success_rate:.2f}%")
     else:
