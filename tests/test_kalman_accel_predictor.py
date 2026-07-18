@@ -113,6 +113,53 @@ class KalmanAccelPredictorTests(unittest.TestCase):
         _, _, _, _, _, ay_after = predictor.get_current_state()
         self.assertAlmostEqual(ay_after, ay_before, delta=1e-6)
 
+    def test_small_noisy_motion_does_not_launch_the_forecast_sideways(self):
+        predictor = KalmanAccelPredictor()
+        dt = 1.0 / 30.0
+        points = [
+            (400.0, 300.0),
+            (401.5, 299.0),
+            (398.5, 301.0),
+            (402.0, 300.5),
+            (405.0, 299.5),
+        ]
+
+        for index, (x, y) in enumerate(points):
+            predictor.update(x, y, index * dt)
+
+        current_x, current_y, *_ = predictor.get_current_state()
+        predicted_x, predicted_y = predictor.predict_future(0.08)
+        lead = math.hypot(predicted_x - current_x, predicted_y - current_y)
+
+        self.assertLess(lead, 30.0)
+
+    def test_harmonic_motion_forecast_has_no_large_single_frame_spikes(self):
+        predictor = KalmanAccelPredictor()
+        dt = 1.0 / 30.0
+        previous_prediction = None
+        largest_step = 0.0
+
+        for index in range(120):
+            timestamp = index * dt
+            x = 500.0 + 120.0 * math.sin(2.0 * math.pi * timestamp / 1.6)
+            # Deterministic contour jitter similar to a moving segmentation mask.
+            x += (index % 3 - 1) * 2.0
+            predictor.update(x, 300.0, timestamp)
+            if not predictor.is_ready():
+                continue
+            prediction = predictor.predict_future(0.08)
+            if previous_prediction is not None:
+                largest_step = max(
+                    largest_step,
+                    math.hypot(
+                        prediction[0] - previous_prediction[0],
+                        prediction[1] - previous_prediction[1],
+                    ),
+                )
+            previous_prediction = prediction
+
+        self.assertLess(largest_step, 45.0)
+
 
 if __name__ == "__main__":
     unittest.main()

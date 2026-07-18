@@ -14,7 +14,7 @@ class AppleDetector:
 
     def __init__(
         self,
-        model_path="best_apple_colab_30epochs.pt",
+        model_path="best_apple_colab_81epochs.pt",
         target_class_name="apple",
         display_name="Apple",
         camera_index=0,

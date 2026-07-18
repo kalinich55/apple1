@@ -1,5 +1,6 @@
 """Constant-acceleration Kalman predictor for image-plane coordinates."""
 
+from collections import deque
 import math
 
 import numpy as np
@@ -7,8 +8,12 @@ import numpy as np
 from config import (
     KALMAN_INNOVATION_GATE,
     KALMAN_JERK_NOISE,
+    KALMAN_FORECAST_NOISE_MARGIN_SIGMA,
+    KALMAN_FORECAST_SPEED_FACTOR,
     KALMAN_MEASUREMENT_STD_PX,
+    KALMAN_MOTION_HISTORY,
     KALMAN_REACQUIRE_AFTER_REJECTIONS,
+    KALMAN_REACQUIRE_VELOCITY_BLEND,
     KALMAN_MIN_POINTS,
 )
 
@@ -28,6 +33,10 @@ class KalmanAccelPredictor:
         jerk_noise: float = KALMAN_JERK_NOISE,
         innovation_gate: float = KALMAN_INNOVATION_GATE,
         reacquire_after_rejections: int = KALMAN_REACQUIRE_AFTER_REJECTIONS,
+        motion_history: int = KALMAN_MOTION_HISTORY,
+        forecast_speed_factor: float = KALMAN_FORECAST_SPEED_FACTOR,
+        forecast_noise_margin_sigma: float = KALMAN_FORECAST_NOISE_MARGIN_SIGMA,
+        reacquire_velocity_blend: float = KALMAN_REACQUIRE_VELOCITY_BLEND,
         max_velocity: float = 12_000.0,
         max_acceleration: float = 60_000.0,
     ):
@@ -37,11 +46,21 @@ class KalmanAccelPredictor:
             raise ValueError("jerk_noise must be positive")
         if reacquire_after_rejections < 1:
             raise ValueError("reacquire_after_rejections must be positive")
+        if motion_history < 2:
+            raise ValueError("motion_history must be at least 2")
+        if forecast_speed_factor <= 0 or forecast_noise_margin_sigma < 0:
+            raise ValueError("forecast guard parameters must be non-negative")
+        if not 0.0 <= reacquire_velocity_blend <= 1.0:
+            raise ValueError("reacquire_velocity_blend must be between 0 and 1")
 
         self.measurement_std_px = float(measurement_std_px)
         self.jerk_noise = float(jerk_noise)
         self.innovation_gate = float(innovation_gate)
         self.reacquire_after_rejections = int(reacquire_after_rejections)
+        self.motion_history = int(motion_history)
+        self.forecast_speed_factor = float(forecast_speed_factor)
+        self.forecast_noise_margin_sigma = float(forecast_noise_margin_sigma)
+        self.reacquire_velocity_blend = float(reacquire_velocity_blend)
         self.max_velocity = float(max_velocity)
         self.max_acceleration = float(max_acceleration)
 
@@ -136,6 +155,7 @@ class KalmanAccelPredictor:
         self.measurement_count = 2
         self._first_measurement = None
         self.last_accepted_measurement = (x, y, timestamp)
+        self.recent_measurements.append((x, y, timestamp))
         self.consecutive_rejections = 0
 
     def _reacquire_from_measurement(self, x: float, y: float, timestamp: float) -> bool:
@@ -144,18 +164,24 @@ class KalmanAccelPredictor:
         Innovation gating is useful for one-off segmentation glitches, but a
         ball that reverses at a wall otherwise gets rejected forever because
         the stale state keeps moving away from it. Two consecutive rejected
-        points are enough to re-estimate velocity from the last trusted point.
+        points are enough to estimate the direction of the new trajectory.
         """
-        if self.last_accepted_measurement is None:
+        if len(self.rejected_measurements) < 2:
             return False
 
-        previous_x, previous_y, previous_t = self.last_accepted_measurement
-        dt = timestamp - previous_t
+        previous_x, previous_y, previous_t = self.rejected_measurements[-2]
+        latest_x, latest_y, latest_t = self.rejected_measurements[-1]
+        dt = latest_t - previous_t
         if dt <= 1e-6:
             return False
 
-        vx = (x - previous_x) / dt
-        vy = (y - previous_y) / dt
+        observed_vx = (latest_x - previous_x) / dt
+        observed_vy = (latest_y - previous_y) / dt
+        old_vx = float(self.state[2, 0])
+        old_vy = float(self.state[3, 0])
+        blend = self.reacquire_velocity_blend
+        vx = (1.0 - blend) * old_vx + blend * observed_vx
+        vy = (1.0 - blend) * old_vy + blend * observed_vy
 
         # A collision is an impulse: it can change velocity almost
         # instantaneously, but it normally does not cancel persistent forces.
@@ -186,6 +212,9 @@ class KalmanAccelPredictor:
         )
         self.last_t = timestamp
         self.last_accepted_measurement = (x, y, timestamp)
+        self.recent_measurements.clear()
+        self.recent_measurements.extend(self.rejected_measurements)
+        self.rejected_measurements.clear()
         self.consecutive_rejections = 0
         self.measurement_count = max(KALMAN_MIN_POINTS, self.measurement_count + 1)
         return True
@@ -204,6 +233,7 @@ class KalmanAccelPredictor:
                 self.last_t = timestamp
                 self.measurement_count = 1
                 self.last_accepted_measurement = (x, y, timestamp)
+                self.recent_measurements.append((x, y, timestamp))
                 self.consecutive_rejections = 0
             else:
                 self._initialize_from_second_measurement(x, y, timestamp)
@@ -233,6 +263,7 @@ class KalmanAccelPredictor:
             # discard only the implausible measurement. A sustained sequence
             # is treated as a real manoeuvre rather than permanent noise.
             self.consecutive_rejections += 1
+            self.rejected_measurements.append((x, y, timestamp))
             if self.consecutive_rejections >= self.reacquire_after_rejections:
                 return self._reacquire_from_measurement(x, y, timestamp)
             return False
@@ -252,8 +283,33 @@ class KalmanAccelPredictor:
         self._clamp_state()
         self.measurement_count += 1
         self.last_accepted_measurement = (x, y, timestamp)
+        self.recent_measurements.append((x, y, timestamp))
+        self.rejected_measurements.clear()
         self.consecutive_rejections = 0
         return True
+
+    def _recent_observed_speed(self) -> tuple[float, float]:
+        """Return a stable local speed estimate and its observation span.
+
+        A least-squares slope over several detector centres is much less
+        sensitive to a one-pixel contour change than a two-point derivative.
+        """
+        if len(self.recent_measurements) < 2:
+            return 0.0, 0.0
+
+        samples = list(self.recent_measurements)
+        latest_t = samples[-1][2]
+        times = np.array([sample[2] - latest_t for sample in samples], dtype=float)
+        span = float(times[-1] - times[0])
+        if span <= 1e-6:
+            return 0.0, 0.0
+
+        design = np.column_stack((times, np.ones_like(times)))
+        xs = np.array([sample[0] for sample in samples], dtype=float)
+        ys = np.array([sample[1] for sample in samples], dtype=float)
+        vx = float(np.linalg.lstsq(design, xs, rcond=None)[0][0])
+        vy = float(np.linalg.lstsq(design, ys, rcond=None)[0][0])
+        return math.hypot(vx, vy), span
 
     def get_current_state(self):
         return tuple(float(value) for value in self.state[:, 0])
@@ -264,7 +320,37 @@ class KalmanAccelPredictor:
 
         delta_t = max(0.0, float(delta_t))
         future_state = self._build_F(delta_t) @ self.state
-        return float(future_state[0, 0]), float(future_state[1, 0])
+        current_position = self.state[:2, 0]
+        forecast_lead = future_state[:2, 0] - current_position
+
+        # A noisy contour can make the internally estimated acceleration very
+        # large for one frame. Bound only the *forecast lead* using motion that
+        # was actually observed over a short window. The confidence ramp keeps
+        # the first two noisy points from producing a long prediction ray.
+        observed_speed, observed_span = self._recent_observed_speed()
+        history_confidence = min(1.0, observed_span / 0.12)
+        if self.consecutive_rejections:
+            # While the newest centre is statistically suspicious, do not
+            # extend the old trajectory aggressively. If it is a real turn,
+            # reacquire will establish the new direction on the next coherent
+            # point; if it is a detector glitch, the state remains untouched.
+            history_confidence = 0.0
+        max_lead = (
+            self.forecast_speed_factor
+            * observed_speed
+            * delta_t
+            * history_confidence
+            + self.forecast_noise_margin_sigma * self.measurement_std_px
+        )
+        lead_length = float(np.linalg.norm(forecast_lead))
+        if lead_length > max_lead:
+            if max_lead <= 0.0:
+                forecast_lead[:] = 0.0
+            else:
+                forecast_lead *= max_lead / lead_length
+
+        prediction = current_position + forecast_lead
+        return float(prediction[0]), float(prediction[1])
 
     def is_ready(self):
         return self.measurement_count >= KALMAN_MIN_POINTS and self.initialized
@@ -277,4 +363,8 @@ class KalmanAccelPredictor:
         self.last_t = None
         self._first_measurement = None
         self.last_accepted_measurement = None
+        self.recent_measurements = deque(maxlen=self.motion_history)
+        self.rejected_measurements = deque(
+            maxlen=max(self.motion_history, self.reacquire_after_rejections)
+        )
         self.consecutive_rejections = 0
